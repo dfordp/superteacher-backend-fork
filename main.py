@@ -12,11 +12,9 @@ from openai import (
 )
 
 # FastAPI imports
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Form, Body, BackgroundTasks, status
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Body, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
 import uvicorn
 
 # Load environment variables
@@ -26,7 +24,6 @@ load_dotenv()
 # 🔑  Load API keys from environment variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-API_KEY = os.getenv("API_KEY", "your-api-key")  # API key for securing endpoints
 # ---------------------------------------------------------------
 
 # Initialize API clients
@@ -49,28 +46,8 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Mount static directory for serving result files
 app.mount("/results", StaticFiles(directory=str(RESULT_DIR)), name="results")
-
-# API Key security
-api_key_header = APIKeyHeader(name="X-API-Key")
-
-def get_api_key(api_key: str = Depends(api_key_header)):
-    if api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key"
-        )
-    return api_key
 
 # =============================================================================
 # 0️⃣  Retry wrapper
@@ -718,7 +695,7 @@ def read_root():
     return {"status": "healthy", "message": "Exam Paper Grading API is running"}
 
 # Routes for question handling
-@app.post("/api/upload-question", dependencies=[Depends(get_api_key)])
+@app.post("/api/upload-question")
 async def upload_question(file: UploadFile = File(...)):
     """Upload a question paper PDF"""
     if not file.filename.lower().endswith('.pdf'):
@@ -732,7 +709,7 @@ async def upload_question(file: UploadFile = File(...)):
         "file_path": str(file_path)
     }
 
-@app.post("/api/extract-questions", dependencies=[Depends(get_api_key)])
+@app.post("/api/extract-questions")
 async def extract_questions_endpoint(file_id: str = Body(...)):
     """Extract questions from a previously uploaded PDF"""
     # Find the file with the matching ID
@@ -751,7 +728,7 @@ async def extract_questions_endpoint(file_id: str = Body(...)):
     }
 
 # Routes for answer handling
-@app.post("/api/upload-answer", dependencies=[Depends(get_api_key)])
+@app.post("/api/upload-answer")
 async def upload_answer(file: UploadFile = File(...)):
     """Upload an answer script PDF"""
     if not file.filename.lower().endswith('.pdf'):
@@ -765,7 +742,7 @@ async def upload_answer(file: UploadFile = File(...)):
         "file_path": str(file_path)
     }
 
-@app.post("/api/ocr-answer", dependencies=[Depends(get_api_key)])
+@app.post("/api/ocr-answer")
 async def ocr_answer(file_id: str = Body(...), dpi: int = Body(300)):
     """Perform OCR on an answer script"""
     # Find the file with the matching ID
@@ -787,7 +764,7 @@ async def ocr_answer(file_id: str = Body(...), dpi: int = Body(300)):
         "ocr_file": str(ocr_file)
     }
 
-@app.post("/api/clean-answers", dependencies=[Depends(get_api_key)])
+@app.post("/api/clean-answers")
 async def clean_answers_endpoint(
     answer_file_id: str = Body(...),
     question_file_id: str = Body(...)
@@ -813,18 +790,18 @@ async def clean_answers_endpoint(
     answers_data = clean_and_align_answers(ocr_text, questions)
     
     # Save cleaned answers to a file
-    clean_file = RESULT_DIR / f"{answer_file_id}.answers.json"
-    with open(clean_file, "w", encoding="utf-8") as f:
+    answers_file = RESULT_DIR / f"{answer_file_id}.answers.json"
+    with open(answers_file, "w", encoding="utf-8") as f:
         json.dump(answers_data, f, indent=2, ensure_ascii=False)
     
     return {
         "answer_file_id": answer_file_id,
         "question_file_id": question_file_id,
         "answers": answers_data,
-        "answers_file": str(clean_file)
+        "answers_file": str(answers_file)
     }
 
-@app.post("/api/grade-answer", dependencies=[Depends(get_api_key)])
+@app.post("/api/grade-answer")
 async def grade_answer(
     answer_file_id: str = Body(...),
     question_file_id: str = Body(...)
@@ -879,7 +856,7 @@ async def grade_answer(
         "grading_file": str(grading_file)
     }
 
-@app.post("/api/annotate-answer", dependencies=[Depends(get_api_key)])
+@app.post("/api/annotate-answer")
 async def annotate_answer(
     answer_file_id: str = Body(...),
     background_tasks: BackgroundTasks = None
@@ -936,75 +913,119 @@ async def annotate_answer(
             "image_urls": [f"/results/{p.name}" for p in result_paths]
         }
 
-@app.post("/api/process-all", dependencies=[Depends(get_api_key)])
+@app.post("/api/process-all")
 async def process_all(
-    question_file: UploadFile = File(...),
-    answer_file: UploadFile = File(...),
+    question_file: UploadFile = File(..., description="Question paper PDF"),
+    answer_file: UploadFile = File(..., description="Answer script PDF"),
     background_tasks: BackgroundTasks = None
 ):
-    """Process a question paper and answer script through the entire pipeline"""
-    # Upload files
-    q_file_id, q_file_path = save_uploaded_file(question_file, QUESTION_DIR)
-    a_file_id, a_file_path = save_uploaded_file(answer_file, ANSWER_DIR)
+    """
+    Process a question paper and answer script through the entire pipeline
     
-    # Function to run the entire pipeline
-    async def run_pipeline():
-        # 1. Extract questions
-        questions = extract_questions(q_file_path)
-        
-        # 2. Perform OCR on answer script
-        ocr_text = ocr_pdf(a_file_path)
-        
-        # 3. Clean and align answers
-        answers_data = clean_and_align_answers(ocr_text, questions)
-        
-        # Save cleaned answers
-        answers_file = RESULT_DIR / f"{a_file_id}.answers.json"
-        with open(answers_file, "w", encoding="utf-8") as f:
-            json.dump(answers_data, f, indent=2, ensure_ascii=False)
-        
-        # 4. Convert answers to dictionary format
-        answers_dict = {
-            int(a["qid"]): a["answer"].rstrip()
-            for a in answers_data if "qid" in a and a.get("answer")
-        }
-        
-        # 5. Grade the answers
-        graded = grade_student(questions, answers_dict)
-        
-        # Save grading result
-        grading_file = RESULT_DIR / f"{a_file_id}.graded.json"
-        with open(grading_file, "w", encoding="utf-8") as f:
-            json.dump(graded, f, indent=2, ensure_ascii=False)
-        
-        # 6. Analyze answer positions
-        tentative_positions = analyze_answer_positions(answers_data)
-        
-        # 7. Annotate the script
-        result_paths = annotate_script(a_file_path, graded, tentative_positions)
-        
-        return {
-            "question_file_id": q_file_id,
-            "answer_file_id": a_file_id,
-            "total_score": graded["total_score"],
-            "out_of": graded["out_of"],
-            "image_paths": [str(p) for p in result_paths],
-            "image_urls": [f"/results/{p.name}" for p in result_paths]
-        }
+    Args:
+        question_file: PDF file containing questions
+        answer_file: PDF file containing student answers
+        background_tasks: Optional background task handler
+    """
+    # Validate file types
+    for file in [question_file, answer_file]:
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File {file.filename} must be a PDF"
+            )
     
-    if background_tasks:
-        # Run in the background for large files
-        background_tasks.add_task(run_pipeline)
-        
-        return {
-            "question_file_id": q_file_id,
-            "answer_file_id": a_file_id,
-            "status": "processing",
-            "message": "Processing started in the background"
-        }
-    else:
-        # Run synchronously
-        return await run_pipeline()
+    try:
+        # Upload files with error handling
+        q_file_id, q_file_path = save_uploaded_file(question_file, QUESTION_DIR)
+        a_file_id, a_file_path = save_uploaded_file(answer_file, ANSWER_DIR)
+
+        async def process_pipeline():
+            try:
+                # 1. Extract questions
+                questions = extract_questions(q_file_path)
+                
+                # 2. Perform OCR on answer script
+                ocr_text = ocr_pdf(a_file_path)
+                
+                # 3. Clean and align answers
+                answers_data = clean_and_align_answers(ocr_text, questions)
+                
+                # Save intermediate results
+                answers_file = RESULT_DIR / f"{a_file_id}.answers.json"
+                with open(answers_file, "w", encoding="utf-8") as f:
+                    json.dump(answers_data, f, indent=2, ensure_ascii=False)
+                
+                # 4. Process answers
+                answers_dict = {
+                    int(a["qid"]): a["answer"].rstrip()
+                    for a in answers_data if "qid" in a and a.get("answer")
+                }
+                
+                # 5. Grade answers
+                graded = grade_student(questions, answers_dict)
+                
+                # Save grading results
+                grading_file = RESULT_DIR / f"{a_file_id}.graded.json"
+                with open(grading_file, "w", encoding="utf-8") as f:
+                    json.dump(graded, f, indent=2, ensure_ascii=False)
+                
+                # 6. Analyze positions and annotate
+                tentative_positions = analyze_answer_positions(answers_data)
+                result_paths = annotate_script(a_file_path, graded, tentative_positions)
+                
+                return {
+                    "status": "success",
+                    "data": {
+                        "files": {
+                            "question_id": q_file_id,
+                            "answer_id": a_file_id,
+                        },
+                        "grading": {
+                            "total_score": graded["total_score"],
+                            "out_of": graded["out_of"],
+                            "details": graded["details"]
+                        },
+                        "outputs": {
+                            "answers": str(answers_file),
+                            "grading": str(grading_file),
+                            "images": [str(p) for p in result_paths],
+                            "urls": [f"/results/{p.name}" for p in result_paths]
+                        }
+                    }
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": str(e)
+                }
+
+        # Handle background processing
+        if background_tasks:
+            background_tasks.add_task(process_pipeline)
+            return {
+                "status": "processing",
+                "message": "Processing started in background",
+                "files": {
+                    "question_id": q_file_id,
+                    "answer_id": a_file_id
+                }
+            }
+        else:
+            return await process_pipeline()
+
+    except Exception as e:
+        # Cleanup on error
+        for path in [q_file_path, a_file_path]:
+            try:
+                if path.exists():
+                    path.unlink()
+            except:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Processing failed: {str(e)}"
+        )
 
 # Run the FastAPI app
 if __name__ == "__main__":
